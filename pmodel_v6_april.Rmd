@@ -1,0 +1,516 @@
+---
+title: "model_calibration"
+output: html_document
+date: "2023-10-30"
+---
+
+### Load required packages
+
+```{r}
+pacman::p_load(tidyverse, tidymodels, ggplot2, patchwork, rpart, MASS, dplyr, poissonreg, MASS, parsnip, dplyr)
+```
+
+### Read data
+
+```{r}
+data = read_csv("data/april_joinedv2.csv")
+# head(data, 5)
+names(data)
+```
+
+### Splitting data set for different scenarios
+
+```{r}
+# from home and bus stop to office, school and bus stop
+weekday_morning <- data %>%
+  filter(DAY_TYPE == "WEEKDAY" & TIME_PER_HOUR %in% c(6, 9)) %>%
+  dplyr::select(TOTAL_TRIPS,
+         origin_HDB, 
+         origin_HDB_Dus,
+         origin_bus, 
+         destination_Business, 
+         destination_FinInsts,
+         destination_bus,
+         origin_station,
+         destination_station) %>%
+  mutate_at(vars(starts_with("origin_"), starts_with("destination_")), ~ifelse(is.na(.), 0, .)) %>%
+  group_by(origin_station, destination_station) %>%
+  mutate(sum())
+
+#from office, school and bus stop to home, bus stops and pubs
+weekday_evening <- data %>%
+  filter(DAY_TYPE == "WEEKDAY" & TIME_PER_HOUR %in% c(5, 8)) %>%
+  dplyr::select(TOTAL_TRIPS,
+         origin_Business, 
+         origin_FinInsts,
+         origin_bus, 
+         destination_HDB, 
+         destination_HDB_Dus,
+         destination_bus,
+         destination_Pubs,
+         origin_station,
+         destination_station) %>%
+  mutate_at(vars(starts_with("origin_"), starts_with("destination_")), ~ifelse(is.na(.), 0, .)) %>%
+  group_by(origin_station, destination_station) %>%
+  mutate(sum())
+
+#from home, bus stop to leisure
+weekend_morning <- data %>%
+  filter(DAY_TYPE == "WEEKENDS/HOLIDAY" & TIME_PER_HOUR %in% c(11, 14)) %>%
+  dplyr::select(TOTAL_TRIPS,
+         origin_HDB, 
+         origin_HDB_Dus,
+         origin_bus, 
+         destination_Cinema, 
+         destination_ParkRec,
+         destination_Malls,
+         destination_RetailShop,
+         destination_bus,
+         origin_station,
+         destination_station) %>%
+  mutate_at(vars(starts_with("origin_"), starts_with("destination_")), ~ifelse(is.na(.), 0, .)) %>%
+  group_by(origin_station, destination_station) %>%
+  mutate(sum())
+
+#from leisure to home and bus stop
+weekend_evening <- data %>%
+  filter(DAY_TYPE == "WEEKENDS/HOLIDAY" & TIME_PER_HOUR %in% c(16, 19)) %>%
+  dplyr::select(TOTAL_TRIPS,
+         origin_Cinema, 
+         origin_ParkRec,
+         origin_Malls,
+         origin_RetailShop,
+         origin_bus,
+         destination_HDB,
+         destination_HDB_Dus,
+         destination_bus,
+         origin_station,
+         destination_station) %>%
+  mutate_at(vars(starts_with("origin_"), starts_with("destination_")), ~ifelse(is.na(.), 0, .)) %>%
+  group_by(origin_station, destination_station) %>%
+  mutate(sum())
+```
+
+### Visualizing the relationships in filtered data set
+
+```{r}
+# y_vars <- names(weekend_morning)[2:13]
+# plot_list <- list()
+# 
+# for (y in y_vars) {
+#   # Create the plot
+#   plot_title <- paste(y)
+#   p <- ggplot(weekend_morning, aes_string(x = "TOTAL_TRIPS", y = y)) +
+#     geom_point(size=1) +
+#     ggtitle(plot_title) +
+#     xlab("total_trips")
+#   
+#   # Add the plot to the list
+#   plot_list[[y]] <- p
+# }
+# 
+# # Combine all plots in the list into a single plot
+# combined_plot <- wrap_plots(plotlist = plot_list)
+# 
+# # Print the combined plot
+# print(combined_plot)
+```
+
+### Splitting data - sampling and cross-validation
+
+```{r}
+# Split data into train, validation, and test sets using rsample
+set.seed(1243)
+# 80% data for training, 20% for testing
+wdm <- initial_split(weekday_morning, prop = 0.8, strata = "TOTAL_TRIPS")
+wdm_train <- training(wdm)
+wdm_test <- testing(wdm)
+
+wde <- initial_split(weekday_evening, prop = 0.8, strata = "TOTAL_TRIPS")
+wde_train <- training(wde)
+wde_test <- testing(wde)
+
+wem <- initial_split(weekend_morning, prop = 0.8, strata = "TOTAL_TRIPS")
+wem_train <- training(wem)
+wem_test <- testing(wem)
+
+wee <- initial_split(weekend_evening, prop = 0.8, strata = "TOTAL_TRIPS")
+wee_train <- training(wee)
+wee_test <- testing(wee)
+```
+
+### Data pre-processing with recipe
+
+```{r}
+wdm_recipe <- recipe(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Business + destination_FinInsts + destination_bus, data = wdm_train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>%
+  # step_log(all_numeric()) %>%
+  prep() %>%
+  juice()
+
+wde_recipe <- recipe(TOTAL_TRIPS ~ origin_Business + origin_FinInsts + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus + destination_Pubs, data = wde_train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>%
+  # step_log(all_numeric()) %>%
+  prep() %>%
+  juice()
+
+wem_recipe <- recipe(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Cinema + destination_ParkRec + destination_Malls + destination_RetailShop + destination_bus, data = wem_train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>%
+  # step_log(all_numeric()) %>%
+  prep() %>%
+  juice()
+
+wee_recipe <- recipe(TOTAL_TRIPS ~ origin_Cinema + origin_ParkRec + origin_Malls + origin_RetailShop + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus, data = wee_train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>%
+  # step_log(all_numeric()) %>%
+  prep() %>%
+  juice()
+```
+
+### [STAT] Multiple Linear Regression - lm engine
+
+```{r}
+wdm_lm_fit <- linear_reg() %>%
+  set_mode("regression") %>%
+  set_engine("glm") %>%
+  fit(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Business + destination_FinInsts + destination_bus, wdm_recipe)
+
+wde_lm_fit <- linear_reg() %>%
+  set_mode("regression") %>%
+  set_engine("glm") %>%
+  fit(TOTAL_TRIPS ~ origin_Business + origin_FinInsts + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus + destination_Pubs, wde_recipe)
+
+wem_lm_fit <- linear_reg() %>%
+  set_mode("regression") %>%
+  set_engine("glm") %>%
+  fit(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Cinema + destination_ParkRec + destination_Malls + destination_RetailShop + destination_bus, wem_recipe)
+
+wee_lm_fit <- linear_reg() %>%
+  set_mode("regression") %>%
+  set_engine("glm") %>%
+  fit(TOTAL_TRIPS ~ origin_Cinema + origin_ParkRec + origin_Malls + origin_RetailShop + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus, wee_recipe)
+```
+
+### [STAT] Poisson - glm engine
+```{r}
+wdm_poisson_fit <- poisson_reg() %>%
+  set_engine("glm") %>%
+  set_mode("regression") %>%
+  fit(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Business + destination_FinInsts + destination_bus, data = wdm_recipe)
+
+wde_poisson_fit <- poisson_reg() %>%
+  set_engine("glm") %>%
+  set_mode("regression") %>%
+  fit(TOTAL_TRIPS ~ origin_Business + origin_FinInsts + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus + destination_Pubs, data = wde_recipe)
+
+wem_poisson_fit <- poisson_reg() %>%
+  set_engine("glm") %>%
+  set_mode("regression") %>%
+  fit(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Cinema + destination_ParkRec + destination_Malls + destination_RetailShop + destination_bus, data = wem_recipe)
+
+wee_poisson_fit <- poisson_reg() %>%
+  set_engine("glm") %>%
+  set_mode("regression") %>%
+  fit(TOTAL_TRIPS ~ origin_Cinema + origin_ParkRec + origin_Malls + origin_RetailShop + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus, data = wee_recipe)
+
+```
+
+### [STAT] Negative Binomial - glm engine (corrupt)
+```{r}
+wdm_nm_fit <- glm.nb(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Business + destination_FinInsts + destination_bus, data = wdm_recipe)
+
+wde_nm_fit <- glm.nb(TOTAL_TRIPS ~ origin_Business + origin_FinInsts + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus + destination_Pubs, data = wde_recipe)
+
+wem_nm_fit <- glm.nb(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Cinema + destination_ParkRec + destination_Malls + destination_RetailShop + destination_bus, data = wem_recipe)
+
+wee_nm_fit <- glm.nb(TOTAL_TRIPS ~ origin_Cinema + origin_ParkRec + origin_Malls + origin_RetailShop + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus, data = wee_recipe)
+
+```
+
+### [ML] Regression Tree - rpart (what we want from this?)
+```{r}
+wdm_rt_fit <- rpart(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Business + destination_FinInsts + destination_bus, data = wdm_recipe, method="poisson")
+
+wde_rt_fit <- rpart(TOTAL_TRIPS ~ origin_Business + origin_FinInsts + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus + destination_Pubs, data = wde_recipe)
+
+wem_rt_fit <- rpart(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Cinema + destination_ParkRec + destination_Malls + destination_RetailShop + destination_bus, data = wem_recipe)
+
+wee_rt_fit <- rpart(TOTAL_TRIPS ~ origin_Cinema + origin_ParkRec + origin_Malls + origin_RetailShop + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus, data = wee_recipe)
+
+plot(wdm_rt_fit)
+```
+
+### [ML] Random Forest
+```{r}
+wdm_rf_fit <- rand_forest(mode = "regression", engine = "randomForest", mtry = .preds(), trees = 100) %>%
+  fit(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Business + destination_FinInsts + destination_bus, wdm_recipe)
+
+wde_rf_fit <- rand_forest(mode = "regression", engine = "randomForest", mtry = .preds(), trees = 100) %>%
+  fit(TOTAL_TRIPS ~ origin_Business + origin_FinInsts + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus + destination_Pubs, wde_recipe)
+
+wem_rf_fit <- rand_forest(mode = "regression", engine = "randomForest", mtry = .preds(), trees = 100) %>%
+  fit(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Cinema + destination_ParkRec + destination_Malls + destination_RetailShop + destination_bus, wem_recipe)
+
+wee_rf_fit <- rand_forest(mode = "regression", engine = "randomForest", mtry = .preds(), trees = 100) %>%
+  fit(TOTAL_TRIPS ~ origin_Cinema + origin_ParkRec + origin_Malls + origin_RetailShop + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus, wee_recipe)
+
+```
+
+### [ML] Boost Tree - xgboost
+```{r}
+wdm_bt_fit <- boost_tree() %>%
+  set_mode("regression") %>%
+  set_engine("xgboost") %>%
+  fit(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Business + destination_FinInsts + destination_bus, wdm_recipe)
+  
+wde_bt_fit <- boost_tree() %>%
+  set_mode("regression") %>%
+  set_engine("xgboost") %>%
+  fit(TOTAL_TRIPS ~ origin_Business + origin_FinInsts + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus + destination_Pubs, wde_recipe)
+  
+wem_bt_fit <- boost_tree() %>%
+  set_mode("regression") %>%
+  set_engine("xgboost") %>%
+  fit(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Cinema + destination_ParkRec + destination_Malls + destination_RetailShop + destination_bus, wem_recipe)
+ 
+wee_bt_fit <- boost_tree() %>%
+  set_mode("regression") %>%
+  set_engine("xgboost") %>%
+ fit(TOTAL_TRIPS ~ origin_Cinema + origin_ParkRec + origin_Malls + origin_RetailShop + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus, wee_recipe)
+
+```
+
+### Computing prediction values
+```{r}
+wdm_trip_recipe <- recipe(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Business + destination_FinInsts + destination_bus, data=wdm_train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>%
+  step_dummy(all_nominal()) %>%
+  step_log(all_outcomes()) %>%
+  step_scale(all_numeric()) %>%
+  prep()
+
+wde_trip_recipe <- recipe(TOTAL_TRIPS ~ origin_Business + origin_FinInsts + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus + destination_Pubs, data = wde_train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>%
+  step_dummy(all_nominal()) %>%
+  prep()
+
+wem_trip_recipe <- recipe(TOTAL_TRIPS ~ origin_HDB + origin_HDB_Dus + origin_bus + destination_Cinema + destination_ParkRec + destination_Malls + destination_RetailShop + destination_bus, data = wem_train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>%
+  step_dummy(all_nominal()) %>%
+  prep()
+
+wee_trip_recipe <- recipe(TOTAL_TRIPS ~ origin_Cinema + origin_ParkRec + origin_Malls + origin_RetailShop + origin_bus + destination_HDB + destination_HDB_Dus + destination_bus, data = wee_train) %>%
+  step_normalize(all_predictors(), -all_nominal()) %>%
+  step_dummy(all_nominal()) %>%
+  prep()
+
+wdm_bake <- bake(wdm_trip_recipe, new_data = wdm_test, all_predictors())
+wde_bake <- bake(wde_trip_recipe, new_data = wde_test, all_predictors())
+wem_bake <- bake(wem_trip_recipe, new_data = wem_test, all_predictors())
+wee_bake <- bake(wee_trip_recipe, new_data = wee_test, all_predictors())
+
+```
+
+### LM predictions
+```{r}
+wdm_lm_pred <- predict(wdm_lm_fit, wdm_bake) %>%
+    rename(wdm_lm = .pred)
+
+wde_lm_pred <- predict(wde_lm_fit, wde_bake) %>%
+    rename(wde_lm = .pred)
+
+wem_lm_pred <- predict(wem_lm_fit, wem_bake) %>%
+    rename(wem_lm = .pred)
+
+wee_lm_pred <- predict(wee_lm_fit, wee_bake) %>%
+    rename(wee_lm = .pred)
+
+```
+
+### Poisson predictions
+```{r}
+wdm_poisson_pred <- predict(wdm_poisson_fit, wdm_bake) %>%
+    rename(wdm_poisson = .pred)
+
+wde_poisson_pred <- predict(wde_poisson_fit, wde_bake) %>%
+    rename(wde_poisson = .pred)
+
+wem_poisson_pred <- predict(wem_poisson_fit, wem_bake) %>%
+    rename(wem_poisson = .pred)
+
+wee_poisson_pred <- predict(wee_poisson_fit, wee_bake) %>%
+    rename(wee_poisson = .pred)
+```
+
+### NM predictions
+```{r}
+wdm_nm_pred <- predict(wdm_nm_fit, wdm_bake)
+# %>%
+#     rename(wdm_nm = .pred)
+
+wde_nm_pred <- predict(wde_nm_fit, wde_bake)
+
+wem_nm_pred <- predict(wem_nm_fit, wem_bake)
+
+wee_nm_pred <- predict(wee_nm_fit, wee_bake)
+```
+
+### RT predictions
+```{r}
+# rpart is tree
+```
+
+### RF predictions
+```{r}
+wdm_rf_pred <- predict(wdm_rf_fit, wdm_bake) %>%
+    rename(wdm_rf = .pred)
+
+wde_rf_pred <- predict(wde_rf_fit, wde_bake) %>%
+    rename(wde_rf = .pred)
+
+wem_rf_pred <- predict(wem_rf_fit, wem_bake) %>%
+    rename(wem_rf = .pred)
+
+wee_rf_pred <- predict(wee_rf_fit, wee_bake) %>%
+    rename(wee_rf = .pred)
+```
+
+### BT predictions
+```{r}
+wdm_bt_pred <- predict(wdm_bt_fit, wdm_bake) %>%
+    rename(wdm_bt = .pred)
+
+wde_bt_pred <- predict(wde_bt_fit, wde_bake) %>%
+    rename(wde_bt = .pred)
+
+wem_bt_pred <- predict(wem_bt_fit, wem_bake) %>%
+    rename(wem_bt = .pred)
+
+wee_bt_pred <- predict(wee_bt_fit, wee_bake) %>%
+    rename(wee_bt = .pred)
+```
+
+### Model Comparison (continue when backs)
+```{r}
+wdm_test_results <- wdm_test %>%
+  dplyr::select(TOTAL_TRIPS) %>%
+  bind_cols(wdm_lm_pred) %>%
+  bind_cols(wdm_poisson_pred) %>%
+  bind_cols(wdm_nm_pred) %>%
+  bind_cols(wdm_rf_pred) %>%
+  bind_cols(wdm_bt_pred)
+
+wde_test_results <- wde_test %>%
+  dplyr::select(TOTAL_TRIPS) %>%
+  bind_cols(wde_lm_pred) %>%
+  bind_cols(wde_poisson_pred) %>%
+  bind_cols(wde_nm_pred) %>%
+  bind_cols(wde_rf_pred) %>%
+  bind_cols(wde_bt_pred)
+
+wem_test_results <- wem_test %>%
+  dplyr::select(TOTAL_TRIPS) %>%
+  bind_cols(wem_lm_pred) %>%
+  bind_cols(wem_poisson_pred) %>%
+  bind_cols(wem_nm_pred) %>%
+  bind_cols(wem_rf_pred) %>%
+  bind_cols(wem_bt_pred)
+
+wee_test_results <- wee_test %>%
+  dplyr::select(TOTAL_TRIPS) %>%
+  bind_cols(wee_lm_pred) %>%
+  bind_cols(wee_poisson_pred) %>%
+  bind_cols(wee_nm_pred) %>%
+  bind_cols(wee_rf_pred) %>%
+  bind_cols(wee_bt_pred)
+```
+
+```{r}
+metric_set(rmse, rsq, mase)
+```
+
+### Visualising performance
+```{r}
+wdm_test_results %>%
+  ungroup() %>%
+  rename(wdm_nb = "...6") %>%
+  dplyr::select(c(3:8)) %>%
+  pivot_longer(!TOTAL_TRIPS, names_to = "model", values_to = "prediction") %>%
+  group_by(model) %>%
+  metrics(truth = TOTAL_TRIPS, estimate = prediction) 
+
+wde_test_results %>%
+  ungroup() %>%
+  rename(wdm_nb = "...6") %>%
+  dplyr::select(c(3:8)) %>%
+  pivot_longer(!TOTAL_TRIPS, names_to = "model", values_to = "prediction") %>%
+  group_by(model) %>%
+  metrics(truth = TOTAL_TRIPS, estimate = prediction)
+
+wem_test_results %>%
+  ungroup() %>%
+  rename(wdm_nb = "...6") %>%
+  dplyr::select(c(3:8)) %>%
+  pivot_longer(!TOTAL_TRIPS, names_to = "model", values_to = "prediction") %>%
+  group_by(model) %>%
+  metrics(truth = TOTAL_TRIPS, estimate = prediction)
+
+wee_test_results %>%
+  ungroup() %>%
+  rename(wdm_nb = "...6") %>%
+  dplyr::select(c(3:8)) %>%
+  pivot_longer(!TOTAL_TRIPS, names_to = "model", values_to = "prediction") %>%
+  group_by(model) %>%
+  metrics(truth = TOTAL_TRIPS, estimate = prediction)
+```
+
+```{r}
+#use fig.width and fig.height to edit size 
+wdm_test_results %>%
+  ungroup() %>%
+  dplyr::select(c(3:8)) %>%
+  rename(wdm_nb = "...6") %>%
+  pivot_longer(!TOTAL_TRIPS, names_to = "model", values_to = "prediction") %>%
+  ggplot(aes(x = prediction, y = TOTAL_TRIPS)) + 
+  geom_abline(col = "red", lty = 2) +
+  geom_point(alpha = .4) +
+  facet_wrap(~model) +
+  coord_fixed() +
+  ggtitle("Weekday morning model results")
+
+wde_test_results %>%
+  ungroup() %>%
+  dplyr::select(c(3:8)) %>%
+  rename(wde_nb = "...6") %>%
+  pivot_longer(!TOTAL_TRIPS, names_to = "model", values_to = "prediction") %>%
+  ggplot(aes(x = prediction, y = TOTAL_TRIPS)) + 
+  geom_abline(col = "red", lty = 2) +
+  geom_point(alpha = .4) +
+  facet_wrap(~model) +
+  coord_fixed() +
+  ggtitle("Weekday evening model results")
+
+wem_test_results %>%
+  ungroup() %>%
+  dplyr::select(c(3:8)) %>%
+  rename(wem_nb = "...6") %>%
+  pivot_longer(!TOTAL_TRIPS, names_to = "model", values_to = "prediction") %>%
+  ggplot(aes(x = prediction, y = TOTAL_TRIPS)) + 
+  geom_abline(col = "red", lty = 2) +
+  geom_point(alpha = .4) +
+  facet_wrap(~model) +
+  coord_fixed() +
+  ggtitle("Weekend morning model results")
+
+wee_test_results %>%
+  ungroup() %>%
+  dplyr::select(c(3:8)) %>%
+  rename(wee_nb = "...6") %>%
+  pivot_longer(!TOTAL_TRIPS, names_to = "model", values_to = "prediction") %>%
+  ggplot(aes(x = prediction, y = TOTAL_TRIPS)) + 
+  geom_abline(col = "red", lty = 2) +
+  geom_point(alpha = .4) +
+  facet_wrap(~model) +
+  coord_fixed() +
+  ggtitle("Weekend evening model results")
+```
